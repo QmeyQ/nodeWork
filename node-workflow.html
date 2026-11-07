@@ -87,6 +87,14 @@
     -webkit-box-orient:vertical;overflow:hidden}
   .ab{margin:1px 10px 5px;font-size:10px;color:#e0a34a}
   .node.attrnode{border-style:dashed}
+  .node.groupio{border-style:dashed;border-color:#5ec8e8;background:#0f2230}
+  .node.groupio .hd{background:hsl(200,30%,40%)!important}
+  .node.groupio .tp{font-size:9px;opacity:.8}
+  .node .rh{position:absolute;left:4px;right:4px;bottom:0;height:8px;cursor:ns-resize}
+  .node .rh::after{content:'';position:absolute;left:50%;bottom:2px;transform:translateX(-50%);
+    width:28px;height:3px;border-radius:2px;background:#4a5568;opacity:0;transition:opacity .15s}
+  .node:hover .rh::after{opacity:1}
+  #wrap.resizing{cursor:ns-resize}
   #rubber{position:fixed;border:1px solid #6ea8ff;background:rgba(110,168,255,.12);pointer-events:none;display:none;z-index:30;border-radius:2px}
   #linkLayer .vis.sel{stroke:#fff !important;stroke-width:3 !important}
 
@@ -277,6 +285,7 @@ function typeColor(t){
 function headColor(n){
   if(n.use_custom_color&&Array.isArray(n.color))
     return `rgb(${n.color.map(c=>Math.round(clamp(+c||0,0,1)*255)).join(',')})`;
+  if(n.type==='GroupInput'||n.type==='GroupOutput')return 'hsl(200,30%,40%)';
   if(n.node_tree)return 'hsl(150,24%,33%)';
   return `hsl(${hashHue(n.type||n.name||'?')},28%,38%)`;
 }
@@ -302,6 +311,28 @@ const bareIn=(v,i)=>({name:'',id:'in:'+i,type:guessType(v),default:v,value:v});
 const bareOut=(v,i)=>({name:'',id:'out:'+i,type:guessType(v)});
 function relist(n){n._in.forEach((s,i)=>s._i=i);n._out.forEach((s,i)=>s._i=i);}
 
+/* ---- 组输入 / 组输出：子树内的镜像节点（不导出，端口与组节点共享同一数组） ---- */
+const GIN='__group_in__',GOUT='__group_out__';
+const isMirrorKey=k=>k===GIN||k===GOUT;
+function addMirrors(tree,gnode){
+  delete tree.nodes[GIN];delete tree.nodes[GOUT];
+  if(!gnode||!gnode.node_tree)return;
+  const gx=Array.isArray(gnode.group_input_location)?gnode.group_input_location:[gnode._x-320,gnode._y];
+  const gy=Array.isArray(gnode.group_output_location)?gnode.group_output_location:[gnode._x+gnode._w+140,gnode._y];
+  tree.nodes[GIN]={name:'组输入',type:'GroupInput',_w:200,_x:gx[0],_y:gx[1],
+    _in:[],_out:gnode._in,_ei:true,_eo:true,_h:100};   // 输出侧镜像组的输入端口
+  tree.nodes[GOUT]={name:'组输出',type:'GroupOutput',_w:200,_x:gy[0],_y:gy[1],
+    _in:gnode._out,_out:[],_ei:true,_eo:true,_h:100};  // 输入侧镜像组的输出端口
+  relist(tree.nodes[GIN]);relist(tree.nodes[GOUT]);
+}
+function ownerGroupNode(){
+  if(!path.length)return null;
+  const pt=path.length===1?root:path[path.length-2].tree;
+  const t=cur();
+  for(const k in pt.nodes){const n=pt.nodes[k];if(n&&n.node_tree===t)return n;}
+  return null;
+}
+
 function normNode(n){
   n._x=Array.isArray(n.location)&&isFinite(n.location[0])?n.location[0]:0;
   n._y=Array.isArray(n.location)&&isFinite(n.location[1])?n.location[1]:0;
@@ -326,7 +357,7 @@ function normNode(n){
   relist(n);
 }
 
-function normAll(tree){
+function normAll(tree,owner){
   if(!tree||typeof tree!=='object')return;
   if(!tree.nodes||typeof tree.nodes!=='object')tree.nodes={};
   if(!Array.isArray(tree.links))tree.links=[];
@@ -335,8 +366,9 @@ function normAll(tree){
     if(!n||typeof n!=='object'){delete tree.nodes[k];continue;}
     if(!n.name)n.name=k;
     normNode(n);
-    if(n.node_tree)normAll(n.node_tree);
+    if(n.node_tree)normAll(n.node_tree,n);
   }
+  addMirrors(tree,owner);           // 组子树内注入 组输入/组输出 镜像节点
   resolveTreeLinks(tree);
 }
 
@@ -381,7 +413,10 @@ function exportTree(tree){
   const t={};
   for(const k in tree){ if(k[0]==='_'||k==='nodes'||k==='links')continue; t[k]=tree[k]; }
   t.nodes={};
-  for(const key in tree.nodes)t.nodes[key]=exportNode(tree.nodes[key]);
+  for(const key in tree.nodes){
+    if(isMirrorKey(key))continue;             // 组输入/组输出为虚拟节点，不导出
+    t.nodes[key]=exportNode(tree.nodes[key]);
+  }
   t.links=(tree.links||[]).map(l=>{const c={};for(const k in l)if(k[0]!=='_')c[k]=l[k];return c;});
   return t;
 }
@@ -444,13 +479,14 @@ function nodeHTML(n){
   let inR='',outR='';
   n._in.forEach(s=>{inR+=`<div class="srow"><span class="dot" data-side="in" data-i="${s._i}" style="background:${typeColor(s.type)}" title="${esc(sockTitle(s))}"></span><span class="sl">${esc(s.name)}</span></div>`;});
   n._out.forEach(s=>{outR+=`<div class="srow"><span class="sl">${esc(s.name)}</span><span class="dot" data-side="out" data-i="${s._i}" style="background:${typeColor(s.type)}" title="${esc(sockTitle(s))}"></span></div>`;});
-  inR+=`<div class="srow"><span class="dot ghost" data-side="in" data-ghost="1" data-i="-1" title="拖动到其他端口：新建输入端口并连接"></span></div>`;
-  outR+=`<div class="srow"><span class="dot ghost" data-side="out" data-ghost="1" data-i="-1" title="拖动到其他端口：新建输出端口并连接"></span></div>`;
-  const gb=n.node_tree?`<div class="gb">▸ 分组 · ${Object.keys(n.node_tree.nodes||{}).length} 个子节点 · 双击进入</div>`:'';
+  inR+=n.type==='GroupInput'?'':`<div class="srow"><span class="dot ghost" data-side="in" data-ghost="1" data-i="-1" title="拖动到其他端口：新建输入端口并连接"></span></div>`;
+  outR+=n.type==='GroupOutput'?'':`<div class="srow"><span class="dot ghost" data-side="out" data-ghost="1" data-i="-1" title="拖动到其他端口：新建输出端口并连接"></span></div>`;
+  const gb=n.node_tree?`<div class="gb">▸ 分组 · ${Object.keys(n.node_tree.nodes||{}).filter(k=>!isMirrorKey(k)).length} 个子节点 · 双击进入</div>`:'';
   const ab=n.attr?`<div class="ab">◇ 属性 · 导出时并入所连节点</div>`:'';
   const ds=n.desc?`<div class="ds" title="${esc(n.desc)}">${esc(n.desc)}</div>`:'';
   const nm=n.label||n.name||'';
-  return `<div class="hd" style="background:${headColor(n)}" title="${esc(n.name)}"><span class="nm">${esc(nm)}</span><span class="tp">${esc(n.type||'')}</span></div><div class="bd"><div class="col">${inR}</div><div class="col r">${outR}</div></div>${gb}${ab}${ds}`;
+  const rh=(n.type==='GroupInput'||n.type==='GroupOutput')?'':'<div class="rh" title="拖动调整节点高度"></div>';
+  return `<div class="hd" style="background:${headColor(n)}" title="${esc(n.name)}"><span class="nm">${esc(nm)}</span><span class="tp">${esc(n.type||'')}</span></div><div class="bd"><div class="col">${inR}</div><div class="col r">${outR}</div></div>${gb}${ab}${ds}${rh}`;
 }
 
 function sockPos(n,side,i){
@@ -472,10 +508,11 @@ function render(){
   for(const key in t.nodes){
     const n=t.nodes[key];
     const el=document.createElement('div');
-    el.className='node'+(n.attr?' attrnode':'')+((sel&&sel.type==='node'&&sel.key===key)||multi.has(key)?' sel':'');
+    el.className='node'+(n.attr?' attrnode':'')+(n.type==='GroupInput'||n.type==='GroupOutput'?' groupio':'')+((sel&&sel.type==='node'&&sel.key===key)||multi.has(key)?' sel':'');
     el.dataset.key=key;
     el.style.left=n._x+'px'; el.style.top=n._y+'px'; el.style.width=n._w+'px';
     el.innerHTML=nodeHTML(n);
+    if(typeof n.height==='number'&&n.height>=60)el.style.minHeight=n.height+'px';   // 手动拉高过的高度（含导出的 height 字段）
     world.appendChild(el);
     n._h=el.offsetHeight;
   }
@@ -578,6 +615,8 @@ wrap.addEventListener('pointerdown',e=>{
   if(e.button===1||e.button===2){startPan(e);return;}   // 中/右键平移
   const dot=e.target.closest('.dot');
   if(dot){startLinkDrag(e,dot);return;}
+  const rh=e.target.closest('.rh');
+  if(rh){startResize(e,rh.closest('.node'));return;}   // 拖节点底边：调整高度
   const lg=e.target.closest('g.lnk');
   if(lg){selectLink(+lg.dataset.i);return;}
   const nd=e.target.closest('.node');
@@ -624,6 +663,17 @@ function startRubber(e){
   rubberBox.style.display='block';
   rubberBox.style.left=e.clientX+'px';rubberBox.style.top=e.clientY+'px';
   rubberBox.style.width='0px';rubberBox.style.height='0px';
+  window.addEventListener('pointermove',onMove);
+  window.addEventListener('pointerup',onUp);
+}
+function startResize(e,el){
+  e.preventDefault();
+  const n=cur().nodes[el.dataset.key];if(!n)return;
+  const had=el.style.minHeight;el.style.minHeight='0px';
+  const ch=el.offsetHeight;                    // 纯内容高度（收缩下限）
+  el.style.minHeight=had;
+  drag={type:'resize',n,el,oy:e.clientY,oh:Math.max(n._h||ch,ch),ch,moved:false};
+  wrap.classList.add('resizing');
   window.addEventListener('pointermove',onMove);
   window.addEventListener('pointerup',onUp);
 }
@@ -681,6 +731,11 @@ function onMove(e){
     drag.n._y=drag.oy+(wy-toWorld(drag.sx,drag.sy)[1]);
     drag.el.style.left=drag.n._x+'px';drag.el.style.top=drag.n._y+'px';
     updateLinksFor(drag.key);
+  }else if(drag.type==='resize'){
+    const nh=Math.max(drag.ch,drag.oh+(e.clientY-drag.oy)/view.k);
+    drag.el.style.minHeight=nh+'px';
+    drag.n._h=drag.el.offsetHeight;
+    drag.n.height=Math.round(drag.n._h);       // 同步持久化字段
   }else if(drag.type==='link'){
     const n=cur().nodes[drag.key];
     const gi=drag.ghost?(drag.side==='in'?n._in.length:n._out.length):drag.s._i;
@@ -696,7 +751,7 @@ function onUp(e){
   if(!drag)return;
   window.removeEventListener('pointermove',onMove);
   window.removeEventListener('pointerup',onUp);
-  wrap.classList.remove('panning','linking-in','linking-out');
+  wrap.classList.remove('panning','linking-in','linking-out','resizing');
   tmpPath.style.display='none';
   const d=drag;drag=null;
   if(d.type==='pan'){
@@ -710,6 +765,7 @@ function onUp(e){
     const rx1=Math.min(x1,x2),ry1=Math.min(y1,y2),rx2=Math.max(x1,x2),ry2=Math.max(y1,y2);
     const hits=[];
     for(const key in cur().nodes){const n=cur().nodes[key];
+      if(isMirrorKey(key))continue;           // 组输入/输出常驻，不参与框选
       const w=n._w||220,h=n._h||150;
       if(n._x<rx2&&n._x+w>rx1&&n._y<ry2&&n._y+h>ry1)hits.push(key);}
     multi=d.add?new Set([...multi,...hits]):new Set(hits);
@@ -723,8 +779,17 @@ function onUp(e){
     return;
   }
   if(d.type==='node'){
-    if(d.moved)autosave();
-    else selectNode(d.key);   // 仅单击（未拖动）时选中并打开属性面板
+    if(d.moved){
+      const g=ownerGroupNode();               // 镜像节点位置持久化到组节点
+      if(d.key===GIN&&g)g.group_input_location=[r2(d.n._x),r2(d.n._y)];
+      if(d.key===GOUT&&g)g.group_output_location=[r2(d.n._x),r2(d.n._y)];
+      autosave();
+    }
+    else if(!isMirrorKey(d.key))selectNode(d.key);   // 仅单击（未拖动）时选中；组输入/输出不弹面板
+    return;
+  }
+  if(d.type==='resize'){
+    if(d.moved)autosave();                    // 高度已同步到 n.height，导出/撤销快照自动包含
     return;
   }
   if(d.type==='link'){
@@ -803,10 +868,11 @@ function openSockModal(spec){
   const gEnd=spec.a.ghost?spec.a:spec.b;            // 至少一端是灰点
   const gn=cur().nodes[gEnd.key];
   const len=(gEnd.side==='in'?gn._in:gn._out).length;
-  $('smTitle').textContent='新建端口 · '+outEnd.key+' → '+inEnd.key+(both?'（两端同名同参数）':'');
+  const dispKey=k=>k===GIN?'组输入':k===GOUT?'组输出':k;
+  $('smTitle').textContent='新建端口 · '+dispKey(outEnd.key)+' → '+dispKey(inEnd.key)+(both?'（两端同名同参数）':'');
   $('smName').value=both?'参数':(gEnd.side==='in'?'输入':'输出')+(len+1);
   $('smType').value='Any';
-  $('smValBox').style.display=inEnd.ghost?'':'none';
+  $('smValBox').style.display=(inEnd.ghost&&inEnd.key!==GOUT)?'':'none';
   $('smVal').value='0';
   $('sockModalWrap').hidden=false;
   $('smName').focus();$('smName').select();
@@ -818,14 +884,16 @@ function confirmSock(){
   if(!name){toast('请输入端口名称',true);return;}
   const type=$('smType').value||'Any';
   function make(end){                // 在灰点端创建端口（两端灰点则同名同参数；已有同名端口则复用）
-    const n=cur().nodes[end.key];
+    let n=cur().nodes[end.key],side=end.side;
+    if(end.key===GIN){n=ownerGroupNode();side='in';}    // 组输入的输出端口 = 组节点的输入端口
+    else if(end.key===GOUT){n=ownerGroupNode();side='out';} // 组输出的输入端口 = 组节点的输出端口
     if(!n)return null;
-    const list=end.side==='in'?n._in:n._out;
+    const list=side==='in'?n._in:n._out;
     const exist=list.find(x=>x.name===name);
     if(exist)return exist;
-    ensureConverted(n,end.side);
+    ensureConverted(n,side);
     const s={name,id:name,type};
-    if(end.side==='in'){
+    if(side==='in'){
       let v=$('smVal').value;
       try{v=JSON.parse(v);}catch(_){/* 非法 JSON 则按字符串 */}
       s.default=v;
@@ -865,6 +933,8 @@ function deleteSelected(){
   }
   const keys=new Set(multi);
   if(sel&&sel.type==='node')keys.add(sel.key);
+  [...keys].filter(isMirrorKey).forEach(k=>keys.delete(k));   // 组输入/输出不可删除
+  if(!keys.size){toast('组输入/组输出不可删除',true);return;}
   const withSub=[...keys].filter(k=>t.nodes[k]&&t.nodes[k].node_tree&&Object.keys(t.nodes[k].node_tree.nodes||{}).length);
   if(withSub.length){
     if(!confirm(`选中的 ${withSub.length} 个节点包含子节点树（将一并删除），确定？`))return;
@@ -893,6 +963,7 @@ function renameNode(oldK,newK){
 function enterTree(key){
   const n=cur().nodes[key];if(!n)return;
   if(!n.node_tree)n.node_tree={name:(n.label||n.name||key)+' 子树',nodes:{},links:[]};
+  addMirrors(n.node_tree,n);   // 新建子树立即注入 组输入/组输出
   path.push({name:n.node_tree.name||key,tree:n.node_tree});
   sel=null;multi.clear();render();fitView();
 }
@@ -1008,6 +1079,7 @@ $('btnRaw').onclick=()=>{
   const nn=fresh;
   cur().nodes[sel.key]=nn;
   normNode(nn);
+  if(nn.node_tree)addMirrors(nn.node_tree,nn);   // 重绑 组输入/组输出 镜像到新对象
   resolveTreeLinks(cur());
   touch();
   toast('已应用原始 JSON');
@@ -1141,6 +1213,7 @@ function saveFile(){
     const consumed=new Set();
     for(const key in tree.nodes){
       const n=tree.nodes[key];
+      if(isMirrorKey(key))continue;  // 组输入/输出为虚拟节点，不导出
       if(n.node_tree)walk(n.node_tree,dir+safeName(key)+'/');
       if(n.attr)continue;            // 属性节点不单独导出
       const o=exportNode(n);
